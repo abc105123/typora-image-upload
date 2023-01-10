@@ -3,6 +3,7 @@ package imgtp
 import (
 	"bytes"
 	"encoding/json"
+	"go/types"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -155,8 +156,17 @@ func doUpload(filePath string) string {
 	//"quota":"32212254720.00",
 	//"use_quota":"10085087.00"},
 	//"time":1673348172}
-	if find["code"].(int) != 200 {
-		return ""
+
+	code := find["code"]
+	switch code {
+	case types.Float64:
+		if code.(float64) != 200 {
+			return ""
+		}
+	case types.Int64:
+		if code.(int64) != 200 {
+			return ""
+		}
 	}
 
 	orignal_url := (find["data"].(map[string]interface{}))["url"].(string)
