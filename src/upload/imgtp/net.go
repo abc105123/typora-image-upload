@@ -1,11 +1,8 @@
 package imgtp
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/json"
-	"fmt"
-	"github.com/valyala/fasthttp"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -22,23 +19,22 @@ const url_get_token string = "https://www.imgtp.com/api/token"
 // post 注意：请求时header如果有参数 token，接口则认证该token，上传的图片也是在该token用户下，否则为游客上传。
 const url_image_upload string = "https://www.imgtp.com/api/upload"
 
+const user_agent_constant = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Safari/537.36 Edg/107.0.1418.42"
+
 // read user_info.json
 const filename_user_info = "user_info.json"
 
-type getTokenRequestParams struct {
+// current path
+var current_abs_path string
+var file_user_info string
+var request_params *userInfoJson
+
+type userInfoJson struct {
 	Email    string `json:"email"`
 	Password string `json:"password"`
 	Refresh  int    `json:"refresh,int"` // default 0, not Refresh
+	Token    string `json:"token,omitempty"`
 }
-
-var request_params getTokenRequestParams
-
-//type getTokenResponse struct {
-//	code int    `json:"code"`
-//	msg  string `json:"msg"`
-//	time int64  `json:"time"`
-//	data string `json:"data"`
-//}
 
 func init() {
 	path, err := exec.LookPath(os.Args[0])
@@ -49,167 +45,121 @@ func init() {
 	// read user_info.json
 	sp := strings.LastIndex(path, "\\")
 	path_abs := string([]rune(path)[0 : sp+1])
-	content := utils.ReadFile(path_abs + filename_user_info)
+
+	current_abs_path = path_abs // end with \
+	file_user_info = current_abs_path + filename_user_info
+
+	content := utils.ReadFile(file_user_info)
 
 	err = json.Unmarshal(content, &request_params)
 	if err != nil {
 		os.Exit(-1)
 	}
+
+	// if user_info.json token is empty
+	if strings.Compare("", request_params.Token) == 0 {
+		token := GetToken()
+		request_params.Token = token
+
+		// save
+		j, _ := json.Marshal(request_params)
+		utils.WriteFile(file_user_info, j)
+	}
+
 }
 
 func GetToken() string {
-	//obuf := make([]byte, 512)
-	args := fasthttp.AcquireArgs()
-	args.Set("email", request_params.Email)
-	args.Set("password", request_params.Password)
-	args.Set("refresh", strconv.Itoa(request_params.Refresh))
 
-	statusCode, body, err := fasthttp.Post(nil, url_get_token, args)
+	url := url_get_token + "?email=" + request_params.Email +
+		"&password=" + request_params.Password +
+		"&refresh=" + strconv.Itoa(request_params.Refresh)
+	request, _ := http.NewRequest("POST", url, nil)
+	request.Header.Set("User-Agent", user_agent_constant)
 
-	if err != nil || statusCode != 200 {
-		os.Exit(-1)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil || response.StatusCode != 200 {
+		os.Exit(-response.StatusCode)
 	}
 
-	//jm := make(map[string]interface{})
-	//json.Unmarshal(body, &jm)
-	//return (jm["data"].(map[string]interface{}))["token"].(string)
+	data := utils.ReadResponseBody(response)
 
-	s := string(body)
+	s := string(data)
 	start := strings.Index(s, "token")
 	end := strings.Index(s, "\"},\"time\"")
 	if start+8 >= end-1 {
 		os.Exit(-1)
 	}
 
-	return string(body[start+8 : end])
-	// ====
-	//url := strings.Builder{}
-	//url.WriteString(url_get_token)
-	//url.WriteString("?email=")
-	//url.WriteString(request_params.Email)
-	//url.WriteString("&password=")
-	//url.WriteString(request_params.Password)
-	//url.WriteString("&refresh=")
-	//url.WriteString(strconv.Itoa(request_params.Refresh))
-	//
-	//request, err := http.NewRequest("POST", url.String(), nil)
-	//client := &http.Client{}
-	//resp, err := client.Do(request)
-	//
-	//if err != nil || resp.StatusCode != 200 {
-	//	os.Exit(-1)
-	//}
-	//
-	//
-	//
-	//var dst []byte
-	//reader := resp.Body
-	//defer reader.Close()
-	//
-	//for i, _ := reader.Read(obuf); i > 0; i, _ = reader.Read(obuf) {
-	//	dst = append(dst, obuf...)
-	//}
-	//m := make(map[string]interface{}, 8)
-	//fmt.Println(m["token"])
+	return string(data[start+8 : end]) // token value
 }
 
-func UploadImages(filePath []string) {
-	// check exist
+func UploadImages(filePath []string) []string {
+	// check token
+	if strings.Compare("", request_params.Token) == 0 {
+		os.Exit(-1)
+	}
+
+	success_list := []string{}
 
 	for i, _ := range filePath {
 		if !utils.IsFileExist(filePath[i]) {
 			os.Exit(-1)
 		}
-
-		file, err := os.Open(filePath[i])
-		if err != nil {
-			os.Exit(-1)
+		path := filePath[i]
+		url := doUpload(path)
+		if strings.Compare("", url) == 0 {
+			// failed, return local image path
+			success_list = append(success_list, path)
+		} else {
+			success_list = append(success_list, url)
 		}
-
-		bufReader := bufio.NewReader(file)
-		bufReader.Read([]byte{})
 	}
+
+	return success_list
 }
 
-const image_path = "D:\\Image\\Pictures\\imagename.jpg"
-
-func Try() {
-	token := GetToken()
-
+func doUpload(filePath string) string {
 	bdbuf := new(bytes.Buffer)
 	bodyWriter := multipart.NewWriter(bdbuf)
 
-	bodyWriter.WriteField("token", token)
+	bodyWriter.WriteField("token", request_params.Token)
 
 	// 上传文件
-	fileWriter, _ := bodyWriter.CreateFormFile("image", image_path)
+	fileWriter, _ := bodyWriter.CreateFormFile("image", filePath)
 
-	f, _ := os.Open(image_path)
+	f, _ := os.Open(filePath)
 	defer f.Close()
 
-	_, _ = io.Copy(fileWriter, f)
+	io.Copy(fileWriter, f)
 
 	contentType := bodyWriter.FormDataContentType()
 	bodyWriter.Close()
 
-	request := fasthttp.AcquireRequest()
-	request.Header.SetMethod("POST")
-	request.Header.SetContentType(contentType)
-	request.SetRequestURI(url_image_upload)
-	request.SetBodyRaw(bdbuf.Bytes())
-
-	response := fasthttp.AcquireResponse()
-
-	fasthttp.Do(request, response)
-
-	var resp_bd map[string]interface{}
-	json.Unmarshal(response.Body(), &resp_bd)
-
-	fmt.Println(resp_bd["data"].(map[string]interface{})["url"])
-}
-
-func Try2() {
-	token := GetToken()
-
-	bdbuf := new(bytes.Buffer)
-	bodyWriter := multipart.NewWriter(bdbuf)
-
-	bodyWriter.WriteField("token", token)
-
-	// 上传文件
-	fileWriter, _ := bodyWriter.CreateFormFile("image", image_path)
-
-	f, _ := os.Open(image_path)
-	defer f.Close()
-
-	_, _ = io.Copy(fileWriter, f)
-
-	contentType := bodyWriter.FormDataContentType()
-	bodyWriter.Close()
-
-	//req := fasthttp.AcquireRequest()
-	//req.Header.Set("token", token)
-	//req.Header.Add(fasthttp.HeaderContentType, contentType)
-	//req.SetBody(bdbuf.Bytes())
-	//req.SetRequestURI("https://www.imgtp.com/api/upload")
-	//
-	//resp := fasthttp.AcquireResponse()
-	//
-	//fasthttp.Do(req, resp)
-	//
-	//fmt.Println(string(resp.Body()))
-
-	// {"code":200,"msg":"success",
-	//"data":{"id":"29986","name":"gamersky_02origin_03_201833184750D.jpg",
-	//"url":"https:\/\/img1.imgtp.com\/2023\/01\/10\/RxOhrxCg.jpg",
-	//"size":835827,"mime":"image\/jpeg",
-	//"sha1":"2b13e2a1c09f7320671c12f310b87669f9948760",
-	//"md5":"f43242a9a25cccf6ac0d361a4b7125bd",
-	//"quota":"32212254720.00","use_quota":"10411198.00"},
-	//"time":1673287586}
 	resp, _ := http.Post(url_image_upload, contentType, bdbuf)
-	defer resp.Body.Close()
-	all, _ := io.ReadAll(resp.Body)
-	fmt.Println(string(all))
+	body := utils.ReadResponseBody(resp)
 
+	if body == nil {
+		return ""
+	}
+
+	// 解析保存地址
+	var find map[string]interface{}
+	json.Unmarshal(body, &find)
+	//{"code":200,"msg":"success",
+	//"data":{"id":"30367","name":"51226312_p0.jpg",
+	//"url":"https:\/\/img1.imgtp.com\/2023\/01\/10\/dwWlrSa8.jpg",
+	//"size":509716,
+	//"mime":"image\/jpeg",
+	//"sha1":"b99ca0667495bd342b2cc954f4d36db6ca535b34",
+	//"md5":"b6175dadf78dec9d8f2e7acc98a0cb0b",
+	//"quota":"32212254720.00",
+	//"use_quota":"10085087.00"},
+	//"time":1673348172}
+	if find["code"].(int) != 200 {
+		return ""
+	}
+
+	orignal_url := (find["data"].(map[string]interface{}))["url"].(string)
+
+	return strings.Replace(orignal_url, "\\", "", -1)
 }

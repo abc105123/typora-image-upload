@@ -4,11 +4,12 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"typora-image-upload/src/constants"
 	"typora-image-upload/src/upload/imgtp"
 )
 
 func after_upload(imageUrls []string) {
-	fmt.Println("Upload Success:")
+	fmt.Println(constants.ReturnType)
 	for _, url := range imageUrls {
 		fmt.Println(url)
 	}
@@ -21,15 +22,18 @@ func main() {
 	// typora give images file path
 	image_paths := flag.Args()
 
+	//
+	var success_list []string
+
 	// no image
 	if len(image_paths) == 0 {
 		os.Exit(1)
 	} else {
 		// do upload
 		//token := imgtp.GetToken()
-		imgtp.Try()
+		success_list = imgtp.UploadImages(image_paths)
 	}
 
 	// finish
-	after_upload([]string{})
+	after_upload(success_list)
 }
